@@ -24,8 +24,11 @@ import android.os.Bundle;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
+import android.support.annotation.VisibleForTesting;
+import android.support.customtabs.CustomTabsService.Relation;
 import android.support.customtabs.CustomTabsService.Result;
-import android.support.customtabs.CustomTabsSessionToken.DummyCallback;
+import android.view.View;
 import android.widget.RemoteViews;
 
 import java.util.List;
@@ -36,26 +39,43 @@ import java.util.List;
  */
 public final class CustomTabsSession {
     private static final String TAG = "CustomTabsSession";
+    private final Object mLock = new Object();
     private final ICustomTabsService mService;
     private final ICustomTabsCallback mCallback;
     private final ComponentName mComponentName;
 
     /**
-     * Provides browsers a way to generate a dummy {@link CustomTabsSession} for testing
+     * The session ID is represented by {@link PendingIntent}. Other apps cannot
+     * forge {@link PendingIntent}. The {@link PendingIntent#equals(Object)} method
+     * considers two {@link PendingIntent} objects equal if their action, data, type,
+     * class and category are the same (even across a process being killed).
+     *
+     * {@see Intent#filterEquals()}
+     */
+    private final PendingIntent mId;
+
+    /**
+     * Provides browsers a way to generate a mock {@link CustomTabsSession} for testing
      * purposes.
      *
      * @param componentName The component the session should be created for.
-     * @return A dummy session with no functionality.
+     * @return A mock session with no functionality.
      */
-    public static CustomTabsSession createDummySessionForTesting(ComponentName componentName) {
-        return new CustomTabsSession(null, new DummyCallback(), componentName);
+    @VisibleForTesting
+    @NonNull
+    public static CustomTabsSession createMockSessionForTesting(
+            @NonNull ComponentName componentName) {
+        return new CustomTabsSession(
+                null, new CustomTabsSessionToken.MockCallback(), componentName, null);
     }
 
     /* package */ CustomTabsSession(
-            ICustomTabsService service, ICustomTabsCallback callback, ComponentName componentName) {
+            ICustomTabsService service, ICustomTabsCallback callback, ComponentName componentName,
+            @Nullable PendingIntent sessionId) {
         mService = service;
         mCallback = callback;
         mComponentName = componentName;
+        mId = sessionId;
     }
 
     /**
@@ -75,6 +95,7 @@ public final class CustomTabsSession {
      * @return                   true for success.
      */
     public boolean mayLaunchUrl(Uri url, Bundle extras, List<Bundle> otherLikelyBundles) {
+        addIdToBundle(extras);
         try {
             return mService.mayLaunchUrl(mCallback, url, extras, otherLikelyBundles);
         } catch (RemoteException e) {
@@ -89,7 +110,7 @@ public final class CustomTabsSession {
      * @param icon          The new icon of the action button.
      * @param description   Content description of the action button.
      *
-     * @see {@link CustomTabsSession#setToolbarItem(int, Bitmap, String)}
+     * @see CustomTabsSession#setToolbarItem(int, Bitmap, String)
      */
     public boolean setActionButton(@NonNull Bitmap icon, @NonNull String description) {
         Bundle bundle = new Bundle();
@@ -98,6 +119,7 @@ public final class CustomTabsSession {
 
         Bundle metaBundle = new Bundle();
         metaBundle.putBundle(CustomTabsIntent.EXTRA_ACTION_BUTTON_BUNDLE, bundle);
+        addIdToBundle(bundle);
         try {
             return mService.updateVisuals(mCallback, metaBundle);
         } catch (RemoteException e) {
@@ -108,21 +130,22 @@ public final class CustomTabsSession {
     /**
      * Updates the {@link RemoteViews} of the secondary toolbar in an existing custom tab session.
      * @param remoteViews   The updated {@link RemoteViews} that will be shown in secondary toolbar.
+     *                      If null, the current secondary toolbar will be dismissed.
      * @param clickableIDs  The ids of clickable views. The onClick event of these views will be
      *                      handled by custom tabs.
      * @param pendingIntent The {@link PendingIntent} that will be sent when the user clicks on one
      *                      of the {@link View}s in clickableIDs.
      */
-    public boolean setSecondaryToolbar(RemoteViews remoteViews, int[] clickableIDs,
-                                       PendingIntent pendingIntent) {
+    public boolean setSecondaryToolbarViews(@Nullable RemoteViews remoteViews,
+            @Nullable int[] clickableIDs, @Nullable PendingIntent pendingIntent) {
         Bundle bundle = new Bundle();
         bundle.putParcelable(CustomTabsIntent.EXTRA_REMOTEVIEWS, remoteViews);
         bundle.putIntArray(CustomTabsIntent.EXTRA_REMOTEVIEWS_VIEW_IDS, clickableIDs);
         bundle.putParcelable(CustomTabsIntent.EXTRA_REMOTEVIEWS_PENDINGINTENT, pendingIntent);
+        addIdToBundle(bundle);
         try {
             return mService.updateVisuals(mCallback, bundle);
         } catch (RemoteException e) {
-            e.printStackTrace();
             return false;
         }
     }
@@ -134,6 +157,8 @@ public final class CustomTabsSession {
      * @param icon          The new icon of the toolbar item.
      * @param description   Content description of the toolbar item.
      * @return              Whether the update succeeded.
+     * @deprecated Use
+     * CustomTabsSession#setSecondaryToolbarViews(RemoteViews, int[], PendingIntent)
      */
     @Deprecated
     public boolean setToolbarItem(int id, @NonNull Bitmap icon, @NonNull String description) {
@@ -144,6 +169,7 @@ public final class CustomTabsSession {
 
         Bundle metaBundle = new Bundle();
         metaBundle.putBundle(CustomTabsIntent.EXTRA_ACTION_BUTTON_BUNDLE, bundle);
+        addIdToBundle(metaBundle);
         try {
             return mService.updateVisuals(mCallback, metaBundle);
         } catch (RemoteException e) {
@@ -151,21 +177,89 @@ public final class CustomTabsSession {
         }
     }
 
-    public boolean validatePostMessageOrigin() {
+    /**
+     * Sends a request to create a two way postMessage channel between the client and the browser.
+     *
+     * @param postMessageOrigin      A origin that the client is requesting to be identified as
+     *                               during the postMessage communication.
+     * @return Whether the implementation accepted the request. Note that returning true
+     *         here doesn't mean an origin has already been assigned as the validation is
+     *         asynchronous.
+     */
+    public boolean requestPostMessageChannel(Uri postMessageOrigin) {
+        Bundle extras = new Bundle();
+        addIdToBundle(extras);
         try {
-            return mService.validatePostMessageOrigin(mCallback);
+            return mService.requestPostMessageChannelWithExtras(
+                    mCallback, postMessageOrigin, extras);
         } catch (RemoteException e) {
             return false;
         }
     }
 
+    /**
+     * Sends a postMessage request using the origin communicated via
+     * {@link CustomTabsService#requestPostMessageChannel(
+     * CustomTabsSessionToken, Uri)}. Fails when called before
+     * {@link PostMessageServiceConnection#notifyMessageChannelReady(Bundle)} is received on
+     * the client side.
+     *
+     * @param message The message that is being sent.
+     * @param extras Reserved for future use.
+     * @return An integer constant about the postMessage request result. Will return
+      *        {@link CustomTabsService#RESULT_SUCCESS} if successful.
+     */
     @Result
-    public synchronized int postMessage(String message, Bundle extras) {
-        try {
-            return mService.postMessage(mCallback, message, extras);
-        } catch (RemoteException e) {
-            return CustomTabsService.RESULT_FAILURE_REMOTE_ERROR;
+    public int postMessage(String message, Bundle extras) {
+        addIdToBundle(extras);
+        synchronized (mLock) {
+            try {
+                return mService.postMessage(mCallback, message, extras);
+            } catch (RemoteException e) {
+                return CustomTabsService.RESULT_FAILURE_REMOTE_ERROR;
+            }
         }
+    }
+
+    /**
+     * Requests to validate a relationship between the application and an origin.
+     *
+     * <p>
+     * See <a href="https://developers.google.com/digital-asset-links/v1/getting-started">here</a>
+     * for documentation about Digital Asset Links. This methods requests the browser to verify
+     * a relation with the calling application, to grant the associated rights.
+     *
+     * <p>
+     * If this method returns {@code true}, the validation result will be provided through
+     * {@link CustomTabsCallback#onRelationshipValidationResult(int, Uri, boolean, Bundle)}.
+     * Otherwise the request didn't succeed. The client must call
+     * {@link CustomTabsClient#warmup(long)} before this.
+     *
+     * @param relation Relation to check, must be one of the {@code CustomTabsService#RELATION_* }
+     *                 constants.
+     * @param origin Origin.
+     * @param extras Reserved for future use.
+     * @return {@code true} if the request has been submitted successfully.
+     */
+    public boolean validateRelationship(@Relation int relation, @NonNull Uri origin,
+                                        @Nullable Bundle extras) {
+        if (relation < CustomTabsService.RELATION_USE_AS_ORIGIN
+                || relation > CustomTabsService.RELATION_HANDLE_ALL_URLS) {
+            return false;
+        }
+        if (extras == null) {
+            extras = new Bundle();
+        }
+        addIdToBundle(extras);
+        try {
+            return mService.validateRelationship(mCallback, relation, origin, extras);
+        } catch (RemoteException e) {
+            return false;
+        }
+    }
+
+    private void addIdToBundle(Bundle bundle) {
+        if (mId != null) bundle.putParcelable(CustomTabsIntent.EXTRA_SESSION_ID, mId);
     }
 
     /* package */ IBinder getBinder() {
@@ -174,5 +268,34 @@ public final class CustomTabsSession {
 
     /* package */ ComponentName getComponentName() {
         return mComponentName;
+    }
+
+    /* package */ PendingIntent getId() {
+        return mId;
+    }
+
+    /**
+     * A class to be used instead of {@link CustomTabsSession} before we are connected
+     * {@link CustomTabsService}.
+     *
+     * Use {@link CustomTabsClient#attachSession(PendingSession)} to get {@link CustomTabsSession}.
+     */
+    public static class PendingSession {
+        private final CustomTabsCallback mCallback;
+        private final PendingIntent mId;
+
+        /* package */ PendingSession(
+                CustomTabsCallback callback, PendingIntent sessionId) {
+            mCallback = callback;
+            mId = sessionId;
+        }
+
+        /* package */ PendingIntent getId() {
+            return mId;
+        }
+
+        /* package */ CustomTabsCallback getCallback() {
+            return mCallback;
+        }
     }
 }

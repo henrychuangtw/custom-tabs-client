@@ -16,11 +16,15 @@
 
 package android.support.customtabs;
 
+import android.app.PendingIntent;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.RemoteException;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
+import android.support.customtabs.CustomTabsService.Relation;
 import android.support.v4.app.BundleCompat;
 import android.util.Log;
 
@@ -30,21 +34,35 @@ import android.util.Log;
  */
 public class CustomTabsSessionToken {
     private static final String TAG = "CustomTabsSessionToken";
-    private final ICustomTabsCallback mCallbackBinder;
+
+    /**
+     * Both {@link #mCallbackBinder} and {@link #mSessionId} are used as session ID.
+     * At least one of the ID should be not null. If {@link #mSessionId} is null,
+     * the session will be invalidated as soon as the client goes away.
+     * Otherwise the browser will attempt to keep the session parameters,
+     * but it might drop them to reclaim resources
+     */
+    @Nullable private final ICustomTabsCallback mCallbackBinder;
+    @Nullable private final PendingIntent mSessionId;
+
     private final CustomTabsCallback mCallback;
 
-    /* package */ static class DummyCallback extends ICustomTabsCallback.Stub {
+    /* package */ static class MockCallback extends ICustomTabsCallback.Stub {
         @Override
         public void onNavigationEvent(int navigationEvent, Bundle extras) {}
 
         @Override
-        public void onMessageChannelReady(Uri origin, Bundle extras) {}
+        public void extraCallback(String callbackName, Bundle args) {}
+
+        @Override
+        public void onMessageChannelReady(Bundle extras) {}
 
         @Override
         public void onPostMessage(String message, Bundle extras) {}
 
         @Override
-        public void extraCallback(String callbackName, Bundle args) {}
+        public void onRelationshipValidationResult(@Relation int relation, Uri requestedOrigin,
+                boolean result, Bundle extras) {}
 
         @Override
         public IBinder asBinder() {
@@ -59,50 +77,37 @@ public class CustomTabsSessionToken {
      *               {@link CustomTabsIntent#EXTRA_SESSION}.
      * @return The token that was generated.
      */
+    @Nullable
     public static CustomTabsSessionToken getSessionTokenFromIntent(Intent intent) {
         Bundle b = intent.getExtras();
+        if (b == null) return null;
         IBinder binder = BundleCompat.getBinder(b, CustomTabsIntent.EXTRA_SESSION);
-        if (binder == null) return null;
-        return new CustomTabsSessionToken(ICustomTabsCallback.Stub.asInterface(binder));
+        PendingIntent sessionId = intent.getParcelableExtra(CustomTabsIntent.EXTRA_SESSION_ID);
+        if (binder == null && sessionId == null) return null;
+        return new CustomTabsSessionToken(ICustomTabsCallback.Stub.asInterface(binder), sessionId);
     }
 
     /**
-     * Provides browsers a way to generate a dummy {@link CustomTabsSessionToken} for testing
+     * Provides browsers a way to generate a mock {@link CustomTabsSessionToken} for testing
      * purposes.
      *
-     * @return A dummy token with no functionality.
+     * @return A mock token with no functionality.
      */
-    public static CustomTabsSessionToken createDummySessionTokenForTesting() {
-        return new CustomTabsSessionToken(new DummyCallback());
+    @NonNull
+    public static CustomTabsSessionToken createMockSessionTokenForTesting() {
+        return new CustomTabsSessionToken(new MockCallback(), null);
     }
 
-    /**@hide*/
-    CustomTabsSessionToken(ICustomTabsCallback callbackBinder) {
+    CustomTabsSessionToken(@Nullable ICustomTabsCallback callbackBinder,
+                           @Nullable PendingIntent sessionId) {
         mCallbackBinder = callbackBinder;
-        mCallback = new CustomTabsCallback() {
+        mSessionId = sessionId;
 
+        mCallback = callbackBinder == null ? null : new CustomTabsCallback() {
             @Override
             public void onNavigationEvent(int navigationEvent, Bundle extras) {
                 try {
                     mCallbackBinder.onNavigationEvent(navigationEvent, extras);
-                } catch (RemoteException e) {
-                    Log.e(TAG, "RemoteException during ICustomTabsCallback transaction");
-                }
-            }
-
-            @Override
-            public synchronized void onMessageChannelReady(Uri origin, Bundle extras) {
-                try {
-                    mCallbackBinder.onMessageChannelReady(origin, extras);
-                } catch (RemoteException e) {
-                    Log.e(TAG, "RemoteException during ICustomTabsCallback transaction");
-                }
-            }
-
-            @Override
-            public synchronized void onPostMessage(String message, Bundle extras) {
-                try {
-                    mCallbackBinder.onPostMessage(message, extras);
                 } catch (RemoteException e) {
                     Log.e(TAG, "RemoteException during ICustomTabsCallback transaction");
                 }
@@ -116,24 +121,67 @@ public class CustomTabsSessionToken {
                     Log.e(TAG, "RemoteException during ICustomTabsCallback transaction");
                 }
             }
+
+            @Override
+            public void onMessageChannelReady(Bundle extras) {
+                try {
+                    mCallbackBinder.onMessageChannelReady(extras);
+                } catch (RemoteException e) {
+                    Log.e(TAG, "RemoteException during ICustomTabsCallback transaction");
+                }
+            }
+
+            @Override
+            public void onPostMessage(String message, Bundle extras) {
+                try {
+                    mCallbackBinder.onPostMessage(message, extras);
+                } catch (RemoteException e) {
+                    Log.e(TAG, "RemoteException during ICustomTabsCallback transaction");
+                }
+            }
+
+            @Override
+            public void onRelationshipValidationResult(@Relation int relation, Uri origin,
+                                                       boolean result, Bundle extras) {
+                try {
+                    mCallbackBinder.onRelationshipValidationResult(
+                            relation, origin, result, extras);
+                } catch (RemoteException e) {
+                    Log.e(TAG, "RemoteException during ICustomTabsCallback transaction");
+                }
+            }
+
         };
     }
 
-    /**@hide*/
     IBinder getCallbackBinder() {
         return mCallbackBinder.asBinder();
     }
 
+    PendingIntent getId() {
+        return mSessionId;
+    }
+
+    public boolean hasCallback() {
+        return mCallbackBinder != null;
+    }
+
+    public boolean hasId() {return mSessionId != null;}
     @Override
     public int hashCode() {
+        if (mSessionId != null) return mSessionId.hashCode();
+
         return getCallbackBinder().hashCode();
     }
 
     @Override
     public boolean equals(Object o) {
         if (!(o instanceof CustomTabsSessionToken)) return false;
-        CustomTabsSessionToken token = (CustomTabsSessionToken) o;
-        return token.getCallbackBinder().equals(mCallbackBinder.asBinder());
+        CustomTabsSessionToken other = (CustomTabsSessionToken) o;
+        if (mSessionId != null && other.getId() != null) return mSessionId.equals(other.getId());
+
+        return other.getCallbackBinder() != null &&
+               other.getCallbackBinder().equals(mCallbackBinder.asBinder());
     }
 
     /**
@@ -142,5 +190,12 @@ public class CustomTabsSessionToken {
      */
     public CustomTabsCallback getCallback() {
         return mCallback;
+    }
+
+    /**
+     * @return Whether this token is associated with the given session.
+     */
+    public boolean isAssociatedWith(CustomTabsSession session) {
+        return session.getBinder().equals(mCallbackBinder);
     }
 }

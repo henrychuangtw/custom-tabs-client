@@ -23,8 +23,9 @@ import android.os.Bundle;
  * @hide
  */
 interface ICustomTabsCallback {
-    oneway void onNavigationEvent(int navigationEvent, in Bundle extras) = 1;
-    oneway void extraCallback(String callbackName, in Bundle args) = 2;
-    void onMessageChannelReady(in Uri origin, in Bundle extras) = 3;
+    void onNavigationEvent(int navigationEvent, in Bundle extras) = 1;
+    void extraCallback(String callbackName, in Bundle args) = 2;
+    void onMessageChannelReady(in Bundle extras) = 3;
     void onPostMessage(String message, in Bundle extras) = 4;
+    void onRelationshipValidationResult(int relation, in Uri origin, boolean result, in Bundle extras) = 5;
 }

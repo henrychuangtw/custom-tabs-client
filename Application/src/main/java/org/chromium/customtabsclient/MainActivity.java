@@ -14,7 +14,6 @@
 
 package org.chromium.customtabsclient;
 
-import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.ActivityOptions;
 import android.app.PendingIntent;
@@ -34,6 +33,11 @@ import android.support.customtabs.CustomTabsClient;
 import android.support.customtabs.CustomTabsIntent;
 import android.support.customtabs.CustomTabsServiceConnection;
 import android.support.customtabs.CustomTabsSession;
+import android.support.customtabs.browseractions.BrowserActionItem;
+import android.support.customtabs.browseractions.BrowserActionsIntent;
+import android.support.customtabs.browseractions.BrowserServiceFileProvider;
+import android.support.customtabs.trusted.TrustedWebActivityService;
+import android.support.v7.app.AppCompatActivity;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.Pair;
@@ -58,7 +62,8 @@ import java.util.List;
 /**
  * Example client activity for using Chrome Custom Tabs.
  */
-public class MainActivity extends Activity implements OnClickListener, ServiceConnectionCallback {
+public class MainActivity
+        extends AppCompatActivity implements OnClickListener, ServiceConnectionCallback {
     private static final String TAG = "CustomTabsClientExample";
     private static final String TOOLBAR_COLOR = "#ef6c00";
 
@@ -72,6 +77,7 @@ public class MainActivity extends Activity implements OnClickListener, ServiceCo
     private Button mMayLaunchButton;
     private Button mLaunchButton;
     private MediaPlayer mMediaPlayer;
+    private Button mLaunchBrowserActionsButton;
 
     /**
      * Once per second, asks the framework for the process importance, and logs any change.
@@ -117,12 +123,15 @@ public class MainActivity extends Activity implements OnClickListener, ServiceCo
         mMayLaunchButton = (Button) findViewById(R.id.may_launch_button);
         mLaunchButton = (Button) findViewById(R.id.launch_button);
         Spinner spinner = (Spinner) findViewById(R.id.spinner);
+        mLaunchBrowserActionsButton = (Button) findViewById(R.id.launch_browser_actions_button);
         mEditText.requestFocus();
         mConnectButton.setOnClickListener(this);
         mWarmupButton.setOnClickListener(this);
         mMayLaunchButton.setOnClickListener(this);
         mLaunchButton.setOnClickListener(this);
         mMediaPlayer = MediaPlayer.create(this, R.raw.amazing_grace);
+        mLaunchBrowserActionsButton.setOnClickListener(this);
+        findViewById(R.id.register_twa_service).setOnClickListener(this);
 
         Intent activityIntent = new Intent(Intent.ACTION_VIEW, Uri.parse("http://www.example.com"));
         PackageManager pm = getPackageManager();
@@ -235,18 +244,51 @@ public class MainActivity extends Activity implements OnClickListener, ServiceCo
             if (mClient != null) success = session.mayLaunchUrl(Uri.parse(url), null, null);
             if (!success) mMayLaunchButton.setEnabled(false);
         } else if (viewId == R.id.launch_button) {
-            CustomTabsIntent.Builder builder = new CustomTabsIntent.Builder(getSession());
+            CustomTabsSession session = getSession();
+            CustomTabsIntent.Builder builder = new CustomTabsIntent.Builder(session);
             builder.setToolbarColor(Color.parseColor(TOOLBAR_COLOR)).setShowTitle(true);
             prepareMenuItems(builder);
             prepareActionButton(builder);
-            prepareBottombar(builder);
+            if (session != null) prepareBottombar(builder);
             builder.setStartAnimations(this, R.anim.slide_in_right, R.anim.slide_out_left);
             builder.setExitAnimations(this, R.anim.slide_in_left, R.anim.slide_out_right);
             builder.setCloseButtonIcon(
                     BitmapFactory.decodeResource(getResources(), R.drawable.ic_arrow_back));
             CustomTabsIntent customTabsIntent = builder.build();
-            CustomTabsHelper.addKeepAliveExtra(this, customTabsIntent.intent);
+            if (session != null) {
+                CustomTabsHelper.addKeepAliveExtra(this, customTabsIntent.intent);
+            } else {
+                if (!TextUtils.isEmpty(mPackageNameToBind)) {
+                    customTabsIntent.intent.setPackage(mPackageNameToBind);
+                }
+            }
             customTabsIntent.launchUrl(this, Uri.parse(url));
+        } else if (viewId == R.id.launch_browser_actions_button) {
+            Intent openLinkIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            PendingIntent openLinkPendingIntent = PendingIntent.getActivity(this, 0, openLinkIntent, 0);
+            Bitmap bitmap = BitmapFactory.decodeResource(getResources(), R.drawable.ic_launcher);
+            Uri uri = BrowserServiceFileProvider.generateUri(this, bitmap, "ic_launcher", 1);
+
+            BrowserActionItem item1 = new BrowserActionItem(
+                    "Open the link (without icon)", openLinkPendingIntent, 0);
+            BrowserActionItem item2 =
+                    new BrowserActionItem("Open the link (with icon from resouce)",
+                            openLinkPendingIntent, R.drawable.ic_launcher);
+            BrowserActionItem item3 = new BrowserActionItem(
+                    "Open the link (with icon from file provider)", openLinkPendingIntent, uri);
+            ArrayList<BrowserActionItem> items = new ArrayList<>();
+            items.add(item1);
+            items.add(item2);
+            items.add(item3);
+            Intent defaultIntent = new Intent();
+            defaultIntent.setClass(getApplicationContext(), BrowserActionsReceiver.class);
+            PendingIntent defaultAction = PendingIntent.getBroadcast(this, 0, defaultIntent, 0);
+            BrowserActionsIntent.openBrowserAction(
+                    this, Uri.parse(url), BrowserActionsIntent.URL_TYPE_NONE, items, defaultAction);
+        } else if (viewId == R.id.register_twa_service) {
+            if (mPackageNameToBind != null) {
+                TrustedWebActivityService.setVerifiedProviderForTesting(this, mPackageNameToBind);
+            }
         }
     }
 
